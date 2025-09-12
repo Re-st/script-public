@@ -9,7 +9,7 @@ class CustomObsidianToHugo(ObsidianToHugo):
         super().__init__(obsidian_vault_dir, hugo_content_dir)
         self.custom_processors = custom_processors
 
-    def custom_rum(self) -> None:
+    def custom_run(self) -> None:
         """
         Delete the hugo content directory and copy the obsidian vault to the
         hugo content directory, then process the content so that the wiki links
@@ -43,11 +43,46 @@ class CustomObsidianToHugo(ObsidianToHugo):
                     for processor in self.custom_processors:
                         # change path from hugo_content_dir to obsidian_vault_dir
                         path = path.replace(self.hugo_content_dir, self.obsidian_vault_dir)
-                        content = processor(content, path)
+                        content = processor(content, path, self.obsidian_vault_dir)
                     with open(os.path.join(root, file), "w", encoding="utf-8") as f:
                         f.write(content)
 
-def process_file(file_contents: str, file_path: str) -> str:
+def revert_nonexistent_links(content: str, obsidian_vault_dir: str) -> str:
+    """
+    Revert converted Hugo links back to Obsidian format if the target file doesn't exist
+    """
+    # Pattern to match Hugo ref links: [text]({{< ref "filename" >}})
+    hugo_ref_pattern = re.compile(r'\[([^\]]+)\]\(\{\{< ref "([^"]+)" >\}\}\)')
+    
+    def check_and_revert_link(match):
+        display_text = match.group(1)
+        link_target = match.group(2)
+        
+        # Check if the target file exists in obsidian vault
+        possible_paths = [
+            os.path.join(obsidian_vault_dir, f"{link_target}.md"),
+            os.path.join(obsidian_vault_dir, link_target, "index.md"),
+            os.path.join(obsidian_vault_dir, link_target, f"{link_target}.md")
+        ]
+        
+        # Check if any of the possible paths exist
+        file_exists = any(os.path.exists(path) for path in possible_paths)
+        
+        if file_exists:
+            # Keep the Hugo link if file exists
+            return match.group(0)
+        else:
+            # Revert to Obsidian format if file doesn't exist
+            return f"[[{link_target}|{display_text}]]"
+    
+    # Apply the check and revert
+    reverted_content = hugo_ref_pattern.sub(check_and_revert_link, content)
+    return reverted_content
+
+def process_file(file_contents: str, file_path: str, obsidian_vault_dir: str) -> str:
+    # Revert links to non-existent files back to Obsidian format
+    file_contents = revert_nonexistent_links(file_contents, obsidian_vault_dir)
+    
     # Extract metadata
     metadata_pattern = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL | re.MULTILINE)
     metadata_match = metadata_pattern.search(file_contents)
@@ -126,6 +161,34 @@ summary: {summary}
     metadata = re.sub(r'\n\n+', '\n', metadata)
     # Return the processed file contents
     final_contents = f"---\n{metadata}---\n" + urls_str + file_contents
+
+    def process_inline_math(content: str) -> str:
+        r"""
+        Finds inline math $...$ and converts it to \(...\)
+        while also converting \, to \\, inside the math content.
+        """
+        def replacer(match):
+            # The captured group is the content inside the $...$
+            math_content = match.group(1)
+            # Replace \, with \\, inside the math content
+            escaped_content = math_content.replace(r'\,', r'\\,').replace(r'_', r'\_').replace(r'*', r'\*')
+            # Return the final string with the corrected format
+            return f"\\\({escaped_content}\\\)"
+
+        # Use a single regex to find all inline math and apply the replacer function
+        # The regex looks for $...$ that are not part of $$...$$
+        return re.sub(r'(?<!\$)\$([^\n$]+)\$(?!\$)', replacer, content)
+
+    final_contents = process_inline_math(final_contents)
+
+    def process_outline_math(content: str) -> str:
+        r"""
+        Finds math $$...$$, and convert \, to \\, inside the math content.
+        """
+        return re.sub(r'\$\$(.*?)\$\$', lambda m: f"$${m.group(1).replace(r'\,', r'\\,').replace(r'_', r'\_')}$$", content, flags=re.DOTALL)
+
+    final_contents = process_outline_math(final_contents)
+
     return final_contents
 
 if __name__ == "__main__":
@@ -141,4 +204,4 @@ if __name__ == "__main__":
         custom_processors=[process_file],
     )
 
-    obsidian_to_hugo.custom_rum()
+    obsidian_to_hugo.custom_run()
